@@ -187,6 +187,7 @@ public class RetentionService {
         long id = requireId(uid);
         Map<String, Object> o = jdbc.queryForMap(
                 "SELECT o.litigation_hold AS hold, o.retention_deadline AS deadline, " +
+                "o.deletion_frozen AS integrityFrozen, o.checksum_status AS checksumStatus, " +
                 "o.owning_project_id AS \"ownerId\", p.status AS \"ownerStatus\" " +
                 "FROM data_object o JOIN project p ON p.id = o.owning_project_id WHERE o.id = ?", id);
         LocalDate deadline = o.get("deadline") == null ? null
@@ -197,13 +198,16 @@ public class RetentionService {
                 WHERE s.object_id = ? AND p.id <> ?
                 """, id, o.get("ownerId"));
         boolean blockedByShare = otherRefs.stream().anyMatch(r -> "ACTIVE".equals(r.get("status")));
+        boolean integrityFrozen = Boolean.TRUE.equals(o.get("integrityFrozen"));
         String verdict;
-        if (Boolean.TRUE.equals(o.get("hold"))) verdict = "BLOCKED_HOLD";
+        if (integrityFrozen) verdict = "BLOCKED_INTEGRITY_FREEZE";
+        else if (Boolean.TRUE.equals(o.get("hold"))) verdict = "BLOCKED_HOLD";
         else if (blockedByShare) verdict = "BLOCKED_SHARED_REFERENCE";
         else if (deadline != null && deadline.isAfter(LocalDate.now())) verdict = "BLOCKED_RETENTION";
         else verdict = "DELETABLE";
         return Map.of("uid", uid, "verdict", verdict,
                 "ownerStatus", o.get("ownerStatus"), "otherReferences", otherRefs,
+                "checksumStatus", o.get("checksumStatus"), "integrityFrozen", integrityFrozen,
                 "retentionExpired", deadline == null || !deadline.isAfter(LocalDate.now()));
     }
 

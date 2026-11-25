@@ -30,6 +30,10 @@ public class CatalogService {
                        o.litigation_hold AS "litigationHold", o.software_version AS "softwareVersion",
                        o.recipe, o.directory_available AS "directoryAvailable",
                        o.is_restore_package AS "restorePackage", o.package_target_uid AS "packageTarget",
+                       o.integrity_class AS "integrityClass",
+                       o.irreplaceable_evidence AS "irreplaceableEvidence",
+                       o.deletion_frozen AS "deletionFrozen",
+                       o.last_audited_at AS "lastAuditedAt",
                        o.withdrawn, o.note
                 FROM data_object o JOIN project p ON p.id = o.owning_project_id
                 WHERE 1=1

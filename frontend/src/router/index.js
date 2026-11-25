@@ -7,6 +7,7 @@ const routes = [
   { path: '/lineage', component: () => import('../views/LineageView.vue'), meta: { title: '血缘 DAG 与共享' } },
   { path: '/retention', component: () => import('../views/RetentionView.vue'), meta: { title: '保留策略与传播' } },
   { path: '/restore', component: () => import('../views/RestoreView.vue'), meta: { title: '恢复计划与校验' } },
+  { path: '/integrity', component: () => import('../views/IntegrityView.vue'), meta: { title: '完整性审计与读量预算' } },
   { path: '/cost', component: () => import('../views/CostView.vue'), meta: { title: '成本账与分摊' } },
   { path: '/snapshots', component: () => import('../views/SnapshotView.vue'), meta: { title: '归档快照回放' } },
   { path: '/projects', component: () => import('../views/ProjectView.vue'), meta: { title: '项目审阅' } }

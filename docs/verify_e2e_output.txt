@@ -24,18 +24,18 @@
 [PASS] 闭包对象数=7 
     单次恢复：取回费=12.16 恢复计算费=4.98 合计=17.14 元
 [PASS] 72h窗口内完成全部预取 累计=13.0h
-[PASS] 分摊总额等于月账单（allocationCheck） 总额=342.255
-    月存储费：PROJ-A=305.19 PROJ-B=19.92 合计=342.25 元/月
+[PASS] 分摊总额等于月账单（allocationCheck） 总额=325.11
+    月存储费：PROJ-A=305.19 PROJ-B=19.92 合计=325.11 元/月
 [PASS] PROJ-A 存储费与手工口径一致（含共享份额扣减） api=305.19 manual=305.19
 [PASS] 共享掩膜按冻结份额 30% 分摊给 PROJ-B 
 [PASS] 共享对象 MASK-A01 份额之和=1 
 [PASS] 共享对象 ALGO-PKG-01 份额之和=1 
 [PASS] 恢复计划执行成功且在RTO内 
 [PASS] 恢复对象数=7 
-[PASS] 取回费已计入月账单 24.33
-[PASS] 恢复计算费已计入月账单 9.96
+[PASS] 取回费已计入月账单 12.165
+[PASS] 恢复计算费已计入月账单 4.98
 [PASS] 含取回后分摊核对仍通过 
-    年存储费（两项目合计口径）≈4312.799999999999 元；研究A单次恢复合计=17.14 元，年1次取回年成本=17.14 元
+    年存储费（两项目合计口径）≈4107.0 元；研究A单次恢复合计=17.14 元，年1次取回年成本=17.14 元
 [PASS] 年1次：按需预取路线更省 按需=17.15 恢复包=65.01
 [PASS] 月1次：恢复包路线更省（额外占用低于重复取回） 按需=205.74 恢复包=67.32
     盈亏平衡频次≈3.83 次/年；恢复包月费=5.4 元（30GB×0.18）
@@ -51,14 +51,48 @@
 [PASS] 项目A独占对象标记退出（RAW-IMG-A01） 
 [PASS] 研究B对象不受项目A退出影响 
 [PASS] 共享掩膜销毁检查=BLOCKED_SHARED_REFERENCE BLOCKED_SHARED_REFERENCE
-[PASS] 快照固定目录水位/依赖/费率版本 {'catalogObjects': 10, 'decisions': 20, 'rateVersion': 'RV-2026Q4', 'snapshotDate': '2026-11-25', 'snapshotId': 3, 'lineageEdges': 9, 'billingEntries': 2}
-[PASS] 快照可回放保留/冻结/迁移/退出等治理决定 {'RETENTION', 'LITIGATION_HOLD', 'LITIGATION_HOLD_RELEASED', 'CHECKSUM_FAILED', 'PROJECT_WITHDRAWN'}
+[PASS] 快照固定目录水位/依赖/费率版本 {'decisions': 14, 'rateVersion': 'RV-2026Q4', 'snapshotDate': '2026-11-25', 'snapshotId': 1, 'lineageEdges': 9, 'billingEntries': 2, 'catalogObjects': 10}
+[PASS] 快照可回放保留/冻结/迁移/退出等治理决定 {'CHECKSUM_FAILED', 'LITIGATION_HOLD_RELEASED', 'RETENTION', 'PROJECT_WITHDRAWN', 'LITIGATION_HOLD'}
+[PASS] 完整性预算覆盖全部5个存储层 ['ARCHIVE', 'COLD', 'HOT', 'RESTORE_TIER', 'WARM']
+[PASS] COLD 层对象比例上限=40% 
+[PASS] COLD 层字节预算=300GB 硬顶 
+[PASS] ARCHIVE 默认自适应路线 
+[PASS] 不可替代证据轮换周期长于常规周期 
+[PASS] 不可替代证据最小清单=4（2原始影像+标注+校准） 4
+[PASS] EC 纠删码对象=1（MASK-A01） 
+[PASS] MASK-A01 为 EC(4+2) 共6片段 
+[PASS] 初始 EC 片段全部健康且在容忍度内 
+[PASS] 介质告警含 DISK-COLD-02 HIGH（自适应输入） 
+[PASS] RESTORE_TIER 周期#1 仅抽1对象且不超字节预算 
+[PASS] RESTORE_TIER 周期#2 仅抽1对象且不超字节预算 
+[PASS] RESTORE_TIER 周期#3 仅抽1对象且不超字节预算 
+[PASS] 同一副本第三次重复检查不记为独立样本 [('PKG-RESULT-A01', False)]
+[PASS] 非独立样本被排除后缺陷率点估计=0（不读取全量） 
+[PASS] COLD 固定比例抽样数≤声明比例名额且字节不超预算 sampled=2 cap=2
+[PASS] 固定比例路线给出 Wilson 缺陷率区间且含点估计 
+[PASS] 自适应路线报告未覆盖概率字段 
+[PASS] 自适应抽样定向命中 DISK-COLD-02 告警媒介并检出 FEAT-A01 位腐蚀 [('RAW-IMG-A01', 'VERIFIED', 'MEDIA_ALERT'), ('RAW-IMG-B01', 'VERIFIED', 'MEDIA_ALERT'), ('FEAT-A01', 'DEFECT_BIT_ROT', 'MEDIA_ALERT'), ('FEAT-B01', 'VERIFIED', 'MEDIA_ALERT'), ('MASK-A01', 'VERIFIED', 'STRATUM_FIXED'), ('MASK-A01', 'VERIFIED', 'STRATUM_FIXED'), ('MASK-A01', 'VERIFIED', 'STRATUM_FIXED'), ('MASK-A01', 'VERIFIED', 'STRATUM_FIXED'), ('MASK-A01', 'VERIFIED', 'STRATUM_FIXED'), ('MASK-A01', 'VERIFIED', 'STRATUM_FIXED')]
+[PASS] 检出缺陷后缺陷率点估计>0 
+[PASS] 位腐蚀缺陷登记并默认冻结删除 
+[PASS] 哈希不符立即冻结删除（BLOCKED_INTEGRITY_FREEZE） 
+[PASS] 对象目录校验状态=FAILED 且删除冻结标记=true 
+[PASS] 健康副本重建修复成功并解除删除冻结 
+[PASS] 修复后不再被完整性冻结阻断 
+[PASS] 修复验证台账留痕 REPAIRED 且摘要匹配 
+[PASS] 可疑副本优先校验，检出 RESULT-A01 错误分层副本 
+[PASS] 错误分层缺陷登记 
+[PASS] 错误分层副本经健康副本修复 
+[PASS] 全片段丢失扫描出覆盖盲区并登记 COVERAGE_GAP {'blindObjects': 1, 'openedDefects': ['MASK-A01']}
+[PASS] 覆盖地图将 MASK-A01 标记为 BLIND 
+[PASS] 无健康副本/不足 k 片段时修复被阻断（HTTP 409，缺陷保持 OPEN） 
+[PASS] 阻断事务回滚后盲区缺陷仍为 OPEN 
+[PASS] 片段恢复后经 EC 重建（k=4）修复盲区 
+[PASS] 修复后 EC 坏片段=0、剩余容忍度=2 
+[PASS] 修复后 MASK-A01 不再是盲区 
+[PASS] 完整性缺陷全部修复（OPEN=0） []
+[PASS] 预算策略复原 COLD 40%/300GB、WARM 50%/20GB 
+[PASS] 审计周期历史完整且无超预算周期 
 
 ================ 验证汇总 ================
-通过 51 项，失败 0 项
+通过 90 项，失败 0 项
 全部场景验证通过
-
-## 补充验证（手工 curl / 构建）
-- reviewer 账号 GET /api/catalog/objects -> 200；POST /api/retention/hold -> 403（只读角色）
-- mvn test: Tests run: 8, Failures: 0, Errors: 0
-- npm run build: 99 modules transformed, built 成功

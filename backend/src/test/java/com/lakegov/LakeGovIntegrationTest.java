@@ -152,4 +152,116 @@ class LakeGovIntegrationTest {
         assertNotNull(rows);
         assertTrue(rows > 0);
     }
+
+    @Test
+    @Order(9)
+    void integrityBudgetStratifiedSamplingAndNonIndependentReplica() {
+        HttpHeaders h = auth();
+        Map[] policies = rest.exchange("/api/integrity/policies", HttpMethod.GET,
+                new HttpEntity<>(h), Map[].class).getBody();
+        assertNotNull(policies);
+        assertEquals(5, policies.length);
+        // 连续三个 RESTORE_TIER 周期（仅 1 个恢复包对象），均受预算约束
+        Map prev = null;
+        for (int seq = 1; seq <= 3; seq++) {
+            Map cycle = rest.exchange("/api/integrity/cycles", HttpMethod.POST,
+                    new HttpEntity<>(Map.of("tierCode", "RESTORE_TIER",
+                            "strategy", "STRATIFIED_FIXED"), h), Map.class).getBody();
+            assertNotNull(cycle);
+            assertEquals(Boolean.TRUE, cycle.get("withinBudget"));
+            assertEquals(1, ((Number) cycle.get("sampledObjects")).intValue());
+            assertTrue(((Number) cycle.get("sampledBytes")).longValue()
+                    <= ((Number) cycle.get("byteBudget")).longValue());
+            prev = cycle;
+        }
+        // 第三周期同一副本重复检查 → 至少一个非独立样本，且不计入缺陷率点估计
+        @SuppressWarnings("unchecked")
+        List<Map> items = (List<Map>) prev.get("items");
+        assertTrue(items.stream().anyMatch(i -> Boolean.FALSE.equals(i.get("independentSample"))));
+        assertEquals(0.0, Double.parseDouble(String.valueOf(prev.get("defectRatePoint"))));
+        // Wilson 区间合法：lower <= point <= upper
+        double lo = Double.parseDouble(String.valueOf(prev.get("defectRateLower")));
+        double up = Double.parseDouble(String.valueOf(prev.get("defectRateUpper")));
+        assertTrue(lo <= 0.0 && 0.0 <= up, "wilson interval invalid");
+    }
+
+    @Test
+    @Order(10)
+    void integrityBitRotFreezesDeletionAndRepairReleases() {
+        HttpHeaders h = auth();
+        // 放宽 COLD 名额/预算保证命中目标对象
+        rest.exchange("/api/integrity/policies", HttpMethod.POST, new HttpEntity<>(Map.of(
+                "tierCode", "COLD", "maxObjectRatio", 1.0,
+                "maxByteBudget", 5_000_000_000_000L, "samplingStrategy", "ADAPTIVE",
+                "auditCycleDays", 30, "evidenceRotationCycleDays", 180), h), Map.class);
+        rest.exchange("/api/integrity/faults/bit-rot", HttpMethod.POST,
+                new HttpEntity<>(Map.of("uid", "FEAT-A01", "replicaNo", 2), h), Map.class);
+        Map cycle = rest.exchange("/api/integrity/cycles", HttpMethod.POST,
+                new HttpEntity<>(Map.of("tierCode", "COLD", "strategy", "ADAPTIVE"), h), Map.class).getBody();
+        assertNotNull(cycle.get("uncoveredProbability"));
+        @SuppressWarnings("unchecked")
+        List<Map> items = (List<Map>) cycle.get("items");
+        assertTrue(items.stream().anyMatch(i -> "FEAT-A01".equals(i.get("uid"))
+                && "DEFECT_BIT_ROT".equals(i.get("resultStatus"))));
+        // 哈希不符立即冻结删除
+        Map check = rest.exchange("/api/retention/deletion-check/FEAT-A01", HttpMethod.GET,
+                new HttpEntity<>(h), Map.class).getBody();
+        assertEquals("BLOCKED_INTEGRITY_FREEZE", check.get("verdict"));
+        assertEquals(Boolean.TRUE, check.get("integrityFrozen"));
+        // 修复后解除冻结
+        Map[] open = rest.exchange("/api/integrity/defects?status=OPEN", HttpMethod.GET,
+                new HttpEntity<>(h), Map[].class).getBody();
+        Map bitRot = java.util.Arrays.stream(open)
+                .filter(d -> "FEAT-A01".equals(d.get("uid")) && "BIT_ROT".equals(d.get("defectType")))
+                .findFirst().orElseThrow();
+        Map repaired = rest.exchange("/api/integrity/defects/" + bitRot.get("id") + "/repair",
+                HttpMethod.POST, new HttpEntity<>(h), Map.class).getBody();
+        assertEquals("REPAIRED", repaired.get("resultStatus"));
+        Map check2 = rest.exchange("/api/retention/deletion-check/FEAT-A01", HttpMethod.GET,
+                new HttpEntity<>(h), Map.class).getBody();
+        assertNotEquals("BLOCKED_INTEGRITY_FREEZE", check2.get("verdict"));
+        // 复原策略与故障
+        rest.exchange("/api/integrity/policies", HttpMethod.POST, new HttpEntity<>(Map.of(
+                "tierCode", "COLD", "maxObjectRatio", 0.40,
+                "maxByteBudget", 300_000_000_000L, "samplingStrategy", "STRATIFIED_FIXED",
+                "auditCycleDays", 30, "evidenceRotationCycleDays", 180), h), Map.class);
+        rest.exchange("/api/integrity/faults/clear", HttpMethod.POST,
+                new HttpEntity<>(h), Map.class);
+    }
+
+    @Test
+    @Order(11)
+    void integrityCoverageGapBlockedWithoutHealthySourceThenEcRebuild() {
+        HttpHeaders h = auth();
+        rest.exchange("/api/integrity/faults/lost", HttpMethod.POST,
+                new HttpEntity<>(Map.of("uid", "MASK-A01"), h), Map.class);
+        Map gap = rest.exchange("/api/integrity/coverage/scan-gaps", HttpMethod.POST,
+                new HttpEntity<>(h), Map.class).getBody();
+        assertTrue(((Number) gap.get("blindObjects")).intValue() >= 1);
+        Map[] coverage = rest.exchange("/api/integrity/coverage?tier=COLD", HttpMethod.GET,
+                new HttpEntity<>(h), Map[].class).getBody();
+        assertTrue(java.util.Arrays.stream(coverage)
+                .anyMatch(o -> "MASK-A01".equals(o.get("uid")) && "BLIND".equals(o.get("coverageStatus"))));
+        Map[] open = rest.exchange("/api/integrity/defects?status=OPEN", HttpMethod.GET,
+                new HttpEntity<>(h), Map[].class).getBody();
+        Map gapDefect = java.util.Arrays.stream(open)
+                .filter(d -> "MASK-A01".equals(d.get("uid")) && "COVERAGE_GAP".equals(d.get("defectType")))
+                .findFirst().orElseThrow();
+        // 无健康副本：修复被 409 阻断，缺陷保持 OPEN
+        org.springframework.http.ResponseEntity<Map> blocked = rest.exchange(
+                "/api/integrity/defects/" + gapDefect.get("id") + "/repair",
+                HttpMethod.POST, new HttpEntity<>(h), Map.class);
+        assertEquals(org.springframework.http.HttpStatus.CONFLICT, blocked.getStatusCode());
+        // 恢复片段后经 EC 重建修复
+        rest.exchange("/api/integrity/faults/clear", HttpMethod.POST,
+                new HttpEntity<>(h), Map.class);
+        Map rebuilt = rest.exchange("/api/integrity/defects/" + gapDefect.get("id") + "/repair",
+                HttpMethod.POST, new HttpEntity<>(h), Map.class).getBody();
+        assertEquals("REPAIRED", rebuilt.get("resultStatus"));
+        assertTrue(String.valueOf(rebuilt.get("source")).contains("EC_RECONSTRUCT"));
+        Map[] ec = rest.exchange("/api/integrity/ec-fragments?uid=MASK-A01", HttpMethod.GET,
+                new HttpEntity<>(h), Map[].class).getBody();
+        assertNotNull(ec);
+        assertEquals(0L, ((Number) ec[0].get("badFragments")).longValue());
+    }
 }

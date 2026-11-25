@@ -138,3 +138,73 @@ SELECT t.id, k.id, t.owning_project_id, true,
 FROM data_object t, data_object k
 WHERE t.object_uid='RESULT-A01' AND k.object_uid='PKG-RESULT-A01'
   AND NOT EXISTS (SELECT 1 FROM restore_package rp WHERE rp.package_object_id = k.id);
+
+-- ============================================================
+-- 完整性治理种子（幂等）
+-- ============================================================
+
+-- ---------- 对象完整性分级：不可替代证据最小清单 ----------
+-- 原始扫描/专家标注/校准证据不可重新获取 → 不可替代证据，享受更长轮换周期
+UPDATE data_object
+SET integrity_class = 'IRREPLACEABLE_EVIDENCE', irreplaceable_evidence = true
+WHERE category IN ('RAW_IMAGE','ANNOTATION','CALIBRATION');
+UPDATE data_object
+SET integrity_class = 'CRITICAL'
+WHERE category IN ('SOFTWARE_PACKAGE','ANALYSIS_RESULT');
+-- 其余派生对象/恢复包保持默认 STANDARD
+
+-- ---------- 每存储层每审计周期的读量预算（声明的对象比例 + 字节预算硬顶） ----------
+INSERT INTO integrity_budget_policy
+  (tier_code, audit_cycle_days, max_object_ratio, max_byte_budget,
+   sampling_strategy, evidence_rotation_cycle_days, active)
+VALUES
+  ('HOT',          30, 0.500000, 10000000000,  'STRATIFIED_FIXED', 180, true),
+  ('WARM',         30, 0.500000, 20000000000,  'STRATIFIED_FIXED', 180, true),
+  ('COLD',         30, 0.400000, 300000000000, 'STRATIFIED_FIXED', 180, true),
+  ('ARCHIVE',      90, 0.250000, 100000000000, 'ADAPTIVE',         360, true),
+  ('RESTORE_TIER', 30, 0.500000, 10000000000,  'STRATIFIED_FIXED', 180, true)
+ON CONFLICT (tier_code) DO NOTHING;
+
+-- ---------- 对象副本账：每对象 2 个全量副本，分布于不同物理媒介 ----------
+INSERT INTO object_replica (object_id, replica_no, placement_tier, media_id, replica_kind,
+                            fragment_status, expected_checksum)
+SELECT o.id, v.replica_no, o.tier_code, v.media_id, 'FULL_COPY', 'HEALTHY',
+       substring(o.checksum from 1 for 62) || lpad(v.replica_no::text, 2, '0')
+FROM (VALUES
+  ('RAW-IMG-A01', 1, 'DISK-COLD-01'), ('RAW-IMG-A01', 2, 'DISK-COLD-02'),
+  ('ANN-A01',     1, 'DISK-WARM-01'), ('ANN-A01',     2, 'DISK-WARM-02'),
+  ('CAL-A01',     1, 'DISK-WARM-01'), ('CAL-A01',     2, 'DISK-WARM-02'),
+  ('ALGO-PKG-01', 1, 'DISK-WARM-01'), ('ALGO-PKG-01', 2, 'DISK-WARM-02'),
+  ('FEAT-A01',    1, 'DISK-COLD-01'), ('FEAT-A01',    2, 'DISK-COLD-02'),
+  ('RESULT-A01',  1, 'DISK-WARM-01'), ('RESULT-A01',  2, 'DISK-WARM-02'),
+  ('PKG-RESULT-A01', 1, 'DISK-RT-01'), ('PKG-RESULT-A01', 2, 'DISK-RT-02'),
+  ('RAW-IMG-B01', 1, 'DISK-COLD-01'), ('RAW-IMG-B01', 2, 'DISK-COLD-02'),
+  ('FEAT-B01',    1, 'DISK-COLD-01'), ('FEAT-B01',    2, 'DISK-COLD-02')
+) AS v(uid, replica_no, media_id)
+JOIN data_object o ON o.object_uid = v.uid
+WHERE NOT EXISTS (
+  SELECT 1 FROM object_replica r
+  WHERE r.object_id = o.id AND r.replica_no = v.replica_no AND r.ec_fragment_index IS NULL);
+
+-- ---------- 纠删码片段账：MASK-A01 采用 EC(4+2)，6 个片段分布 4 块媒介 ----------
+INSERT INTO object_replica (object_id, replica_no, placement_tier, media_id, replica_kind,
+                            ec_fragment_index, ec_k, ec_m, fragment_status, expected_checksum)
+SELECT o.id, 1, o.tier_code, v.media_id, 'EC_FRAGMENT', v.frag, 4, 2, 'HEALTHY',
+       substring(o.checksum from 1 for 60) || lpad(v.frag::text, 4, '0')
+FROM (VALUES
+  (0, 'DISK-COLD-03'), (1, 'DISK-COLD-04'), (2, 'DISK-COLD-05'), (3, 'DISK-COLD-06'),
+  (4, 'DISK-COLD-03'), (5, 'DISK-COLD-05')
+) AS v(frag, media_id)
+CROSS JOIN data_object o
+WHERE o.object_uid = 'MASK-A01'
+  AND NOT EXISTS (
+    SELECT 1 FROM object_replica r
+    WHERE r.object_id = o.id AND r.ec_fragment_index = v.frag);
+
+-- ---------- 介质告警（自适应抽样输入：DISK-COLD-02 SMART 高危） ----------
+INSERT INTO media_alert (media_id, tier_code, severity, alert_type, active)
+SELECT 'DISK-COLD-02', 'COLD', 'HIGH', 'SMART_ERROR', true
+WHERE NOT EXISTS (SELECT 1 FROM media_alert WHERE media_id = 'DISK-COLD-02' AND active = true);
+INSERT INTO media_alert (media_id, tier_code, severity, alert_type, active)
+SELECT 'DISK-WARM-02', 'WARM', 'MEDIUM', 'MEDIA_SCRUB_FAIL', true
+WHERE NOT EXISTS (SELECT 1 FROM media_alert WHERE media_id = 'DISK-WARM-02' AND active = true);

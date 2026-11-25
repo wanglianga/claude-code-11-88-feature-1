@@ -197,11 +197,157 @@ CREATE TABLE IF NOT EXISTS governance_event (
                     CHECK (event_type IN (
                         'CHECKSUM_FAILED','RETENTION_RULE_CHANGED','LITIGATION_HOLD',
                         'LITIGATION_HOLD_RELEASED','PROJECT_WITHDRAWN','RESTORE_BLOCKED',
-                        'TIER_MIGRATION','SHARE_FROZEN')),
+                        'TIER_MIGRATION','SHARE_FROZEN','INTEGRITY_DEFECT','REPAIR_COMPLETED')),
     object_id       BIGINT REFERENCES data_object(id),
     project_id      BIGINT REFERENCES project(id),
     payload         JSONB,
     propagated      BOOLEAN NOT NULL DEFAULT false,
     affected_uids   JSONB,
     created_at      TIMESTAMP NOT NULL DEFAULT now()
+);
+
+-- ============================================================
+-- 完整性治理域：对象完整性账 / 校验覆盖地图 / 纠删码片段状态 /
+--              读量预算 / 修复优先级（独立于恢复依赖）
+-- ============================================================
+
+-- ---------- 对象目录补列：完整性分级、不可替代证据、删除冻结 ----------
+ALTER TABLE data_object ADD COLUMN IF NOT EXISTS integrity_class      VARCHAR(24) NOT NULL DEFAULT 'STANDARD'
+    CHECK (integrity_class IN ('IRREPLACEABLE_EVIDENCE','CRITICAL','STANDARD'));
+ALTER TABLE data_object ADD COLUMN IF NOT EXISTS irreplaceable_evidence BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE data_object ADD COLUMN IF NOT EXISTS deletion_frozen       BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE data_object ADD COLUMN IF NOT EXISTS last_audited_at       TIMESTAMP;
+ALTER TABLE data_object ADD COLUMN IF NOT EXISTS audit_round_no        INT;
+ALTER TABLE data_object ADD COLUMN IF NOT EXISTS audit_verified_bytes  BIGINT NOT NULL DEFAULT 0; -- 跨周期累计已校验字节（大对象部分扫描）
+
+-- ---------- 完整性读量预算策略（每个存储层 × 审计周期声明的对象比例与字节预算） ----------
+CREATE TABLE IF NOT EXISTS integrity_budget_policy (
+    id                          BIGSERIAL PRIMARY KEY,
+    tier_code                   VARCHAR(32) NOT NULL REFERENCES storage_tier(code),
+    audit_cycle_days            INT NOT NULL DEFAULT 30,           -- 常规审计周期
+    max_object_ratio            NUMERIC(7,6) NOT NULL CHECK (max_object_ratio BETWEEN 0 AND 1),
+    max_byte_budget             BIGINT NOT NULL CHECK (max_byte_budget >= 0), -- 每周期可校验字节上限
+    sampling_strategy           VARCHAR(16) NOT NULL DEFAULT 'STRATIFIED_FIXED'
+                                CHECK (sampling_strategy IN ('STRATIFIED_FIXED','ADAPTIVE')),
+    evidence_rotation_cycle_days INT NOT NULL DEFAULT 180,         -- 不可替代证据的更长轮换周期
+    active                      BOOLEAN NOT NULL DEFAULT true,
+    updated_at                  TIMESTAMP NOT NULL DEFAULT now(),
+    UNIQUE (tier_code)
+);
+
+-- ---------- 对象副本与纠删码片段状态（对象完整性账） ----------
+CREATE TABLE IF NOT EXISTS object_replica (
+    id                  BIGSERIAL PRIMARY KEY,
+    object_id           BIGINT NOT NULL REFERENCES data_object(id),
+    replica_no          INT NOT NULL,                  -- 副本序号；EC 对象为逻辑片段组
+    placement_tier      VARCHAR(32) NOT NULL REFERENCES storage_tier(code),
+    media_id            VARCHAR(64) NOT NULL,          -- 物理媒介（盘/机架/介质批次）
+    replica_kind        VARCHAR(16) NOT NULL DEFAULT 'FULL_COPY'
+                        CHECK (replica_kind IN ('FULL_COPY','EC_FRAGMENT')),
+    ec_fragment_index   INT,                           -- EC 片段序号（k+m 中的编号）
+    ec_k                INT,                           -- 数据片段数
+    ec_m                INT,                           -- 冗余片段数
+    fragment_status     VARCHAR(16) NOT NULL DEFAULT 'HEALTHY'
+                        CHECK (fragment_status IN ('HEALTHY','DEGRADED','LOST','MISPLACED')),
+    latent_corruption   BOOLEAN NOT NULL DEFAULT false,  -- 故障注入的潜在位腐蚀，审计扫描时检出
+    expected_checksum   VARCHAR(128) NOT NULL,         -- 片段/副本期望摘要
+    last_verified_at    TIMESTAMP,
+    UNIQUE (object_id, replica_no, ec_fragment_index)
+);
+CREATE INDEX IF NOT EXISTS idx_replica_object ON object_replica(object_id);
+CREATE INDEX IF NOT EXISTS idx_replica_media ON object_replica(media_id);
+
+-- ---------- 介质告警（自适应抽样的输入） ----------
+CREATE TABLE IF NOT EXISTS media_alert (
+    id              BIGSERIAL PRIMARY KEY,
+    media_id        VARCHAR(64) NOT NULL,
+    tier_code       VARCHAR(32) NOT NULL REFERENCES storage_tier(code),
+    severity        VARCHAR(8) NOT NULL CHECK (severity IN ('LOW','MEDIUM','HIGH')),
+    alert_type      VARCHAR(32) NOT NULL,             -- SMART_ERROR / MEDIA_SCRUB_FAIL / TEMPERATURE ...
+    active          BOOLEAN NOT NULL DEFAULT true,
+    created_at      TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_media_alert_active ON media_alert(active, media_id);
+
+-- ---------- 审计周期（一次抽样审计运行；每个存储层一条预算执行记录） ----------
+CREATE TABLE IF NOT EXISTS audit_cycle (
+    id                  BIGSERIAL PRIMARY KEY,
+    cycle_seq           INT NOT NULL,                 -- 周期序号（同层递增）
+    tier_code           VARCHAR(32) NOT NULL REFERENCES storage_tier(code),
+    strategy            VARCHAR(16) NOT NULL CHECK (strategy IN ('STRATIFIED_FIXED','ADAPTIVE')),
+    started_at          TIMESTAMP NOT NULL DEFAULT now(),
+    population_objects  INT NOT NULL,                 -- 该层对象总数（总体）
+    population_bytes    BIGINT NOT NULL,
+    sampled_objects     INT NOT NULL DEFAULT 0,
+    sampled_bytes       BIGINT NOT NULL DEFAULT 0,
+    byte_budget         BIGINT NOT NULL,              -- 声明的字节预算
+    object_ratio_limit  NUMERIC(7,6) NOT NULL,        -- 声明的对象比例上限
+    within_budget       BOOLEAN NOT NULL DEFAULT true,
+    -- 该层缺陷率区间（Wilson 得分区间，不读取全量对象）
+    defect_rate_lower   NUMERIC(9,6),
+    defect_rate_upper   NUMERIC(9,6),
+    defect_rate_point   NUMERIC(9,6),
+    uncovered_probability NUMERIC(9,6),               -- 自适应路线：单缺陷对象未被抽中的概率
+    status              VARCHAR(16) NOT NULL DEFAULT 'OPEN'
+                        CHECK (status IN ('OPEN','COMPLETED')),
+    note                VARCHAR(512),
+    UNIQUE (tier_code, cycle_seq)
+);
+
+-- ---------- 审计抽样项（覆盖地图：对象×周期×副本，含分层/年龄/价值层位） ----------
+CREATE TABLE IF NOT EXISTS audit_sample_item (
+    id                  BIGSERIAL PRIMARY KEY,
+    cycle_id            BIGINT NOT NULL REFERENCES audit_cycle(id),
+    object_id           BIGINT NOT NULL REFERENCES data_object(id),
+    replica_id          BIGINT REFERENCES object_replica(id),
+    tier_code           VARCHAR(32) NOT NULL,
+    media_id            VARCHAR(64),
+    age_band            VARCHAR(16) NOT NULL CHECK (age_band IN ('NEW','MID','AGED')),
+    value_band          VARCHAR(24) NOT NULL
+                        CHECK (value_band IN ('IRREPLACEABLE_EVIDENCE','CRITICAL','STANDARD')),
+    sample_basis        VARCHAR(24) NOT NULL
+                        CHECK (sample_basis IN (
+                            'STRATUM_FIXED','EVIDENCE_ROTATION','PRIOR_DEFECT',
+                            'MEDIA_ALERT','HIGH_VALUE')),
+    independent_sample  BOOLEAN NOT NULL DEFAULT true, -- 同副本重复检查不计为独立样本
+    dedup_key           VARCHAR(128),                  -- (object,replica) 去重键
+    result_status       VARCHAR(16) NOT NULL DEFAULT 'PENDING'
+                        CHECK (result_status IN ('PENDING','VERIFIED','DEFECT_BIT_ROT','DEFECT_MISPLACED')),
+    bytes_scanned       BIGINT NOT NULL DEFAULT 0,
+    checked_at          TIMESTAMP,
+    UNIQUE (cycle_id, object_id, replica_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sample_cycle ON audit_sample_item(cycle_id);
+CREATE INDEX IF NOT EXISTS idx_sample_object ON audit_sample_item(object_id);
+
+-- ---------- 完整性缺陷台账（位腐蚀 / 错误分层副本 / 覆盖盲区） ----------
+CREATE TABLE IF NOT EXISTS integrity_defect (
+    id                  BIGSERIAL PRIMARY KEY,
+    object_id           BIGINT NOT NULL REFERENCES data_object(id),
+    replica_id          BIGINT REFERENCES object_replica(id),
+    cycle_id            BIGINT REFERENCES audit_cycle(id),
+    defect_type         VARCHAR(24) NOT NULL
+                        CHECK (defect_type IN ('BIT_ROT','MISPLACED_REPLICA','COVERAGE_GAP')),
+    severity            VARCHAR(8) NOT NULL CHECK (severity IN ('LOW','MEDIUM','HIGH','CRITICAL')),
+    detail              JSONB,
+    repair_priority     INT NOT NULL DEFAULT 100,      -- 数值越小优先级越高
+    repair_status       VARCHAR(16) NOT NULL DEFAULT 'OPEN'
+                        CHECK (repair_status IN ('OPEN','REPAIRING','REPAIRED','ACCEPTED_RISK')),
+    freeze_deletion     BOOLEAN NOT NULL DEFAULT true,  -- 哈希不符立即冻结删除
+    detected_at         TIMESTAMP NOT NULL DEFAULT now(),
+    repaired_at         TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_defect_status ON integrity_defect(repair_status, repair_priority);
+CREATE INDEX IF NOT EXISTS idx_defect_object ON integrity_defect(object_id);
+
+-- ---------- 修复验证台账（修复后重校验，独立样本留痕） ----------
+CREATE TABLE IF NOT EXISTS repair_verification (
+    id                  BIGSERIAL PRIMARY KEY,
+    defect_id           BIGINT NOT NULL REFERENCES integrity_defect(id),
+    object_id           BIGINT NOT NULL REFERENCES data_object(id),
+    source_replica_id   BIGINT REFERENCES object_replica(id), -- 修复来源（健康副本/EC 重建）
+    verified_checksum   VARCHAR(128),
+    result_status       VARCHAR(16) NOT NULL CHECK (result_status IN ('REPAIRED','FAILED')),
+    detail              JSONB,
+    verified_at         TIMESTAMP NOT NULL DEFAULT now()
 );

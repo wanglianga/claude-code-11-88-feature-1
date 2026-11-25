@@ -41,6 +41,7 @@ const menus = [
   { path: '/lineage', title: '血缘 DAG 与共享', icon: '⇄' },
   { path: '/retention', title: '保留策略与传播', icon: '⛿' },
   { path: '/restore', title: '恢复计划与校验', icon: '↺' },
+  { path: '/integrity', title: '完整性审计与预算', icon: '◈' },
   { path: '/cost', title: '成本账与分摊', icon: '¥' },
   { path: '/snapshots', title: '归档快照回放', icon: '❏' },
   { path: '/projects', title: '项目审阅', icon: '⚲' }
